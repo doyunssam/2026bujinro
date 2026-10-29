@@ -306,6 +306,7 @@ input[type=text]{border:1.5px solid var(--line);border-radius:12px;background:va
     <div id="tmain" hidden>
       <div class="notice" id="dbnote" hidden></div>
       <div class="stats" id="stats"></div>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px"><button type="button" class="btn ghost" id="csvBtn">CSV로 내려받기 (엑셀)</button></div>
       <div class="kybars" id="kybars"></div>
       <div class="tgrid">
         <aside class="listbox">
@@ -330,6 +331,8 @@ input[type=text]{border:1.5px solid var(--line);border-radius:12px;background:va
 "use strict";
 /* ▼ 구글 Apps Script 웹 앱 주소를 따옴표 안에 붙여 넣으세요 (…/exec 로 끝나는 주소) */
 const API_URL = "PASTE_YOUR_APPS_SCRIPT_URL";
+/* 구글 시트를 연결하지 않으면 '태블릿 한 대 모드'로 동작해요: 응답이 이 기기 브라우저에만 저장되고, 같은 기기의 상담 교사 탭에서 바로 보여요. */
+const LOCAL_PIN = "0808";   // ← 태블릿 한 대 모드의 상담 교사 화면 코드
 const OPTS = {
   q1: ["정해졌다", "2~3개 중에서 고민 중이다", "아직 없다"],
   q5: ["국어","수학","영어","사회","역사","과학","기술·가정","정보","체육","예술","제2외국어·한문"],
@@ -434,6 +437,12 @@ function updateProgress(){
 
 /* ---------- 저장소: 구글 시트(Apps Script) ---------- */
 const apiReady = /^https:\/\/script\.google\.com\//.test(API_URL);
+const LKEY = "ssum-responses";
+let localOK = true;
+function loadLocal(){ try { return JSON.parse(localStorage.getItem(LKEY) || "[]"); } catch (e) { localOK = false; return []; } }
+function saveLocal(list){ try { localStorage.setItem(LKEY, JSON.stringify(list)); return true; } catch (e) { localOK = false; return false; } }
+function localUpdate(id, patch){ const l = loadLocal(); const x = l.find(r => r.id === id); if (!x) return false; Object.assign(x, patch); return saveLocal(l); }
+function localDelete(id){ return saveLocal(loadLocal().filter(r => r.id !== id)); }
 async function api(payload){
   // text/plain 으로 보내야 Apps Script에서 CORS 사전 요청 없이 받을 수 있음
   const res = await fetch(API_URL, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(payload) });
@@ -447,7 +456,7 @@ async function submitResponse(r){
   r.createdAt = Date.now(); r.day = todayKey(r.createdAt);
   r.id = "r" + r.createdAt.toString(36) + Math.random().toString(36).slice(2,6);
   r.status = "wait"; r.coachWord = ""; r.action = ""; r.memo = ""; r.booths = []; r.subjects = "";
-  if (!apiReady) return { r, saved: false };
+  if (!apiReady) { const l = loadLocal(); l.push(r); return { r, saved: saveLocal(l) }; }
   try { await api({ action: "submit", data: r }); return { r, saved: true }; }
   catch (e) {
     try { await new Promise(t => setTimeout(t, 800)); await api({ action: "submit", data: r }); return { r, saved: true }; }
@@ -469,7 +478,7 @@ $("#form").addEventListener("submit", async e => {
   $("#ticketno").textContent = "#" + res.r.no;
   $("#donemsg").textContent = res.saved
     ? "상담 선생님께 이 번호를 알려 주세요. 이제 썸 코치와 함께 내 꿈과 썸을 타 볼까요?"
-    : "이 화면을 상담 선생님께 그대로 보여 주세요. (인터넷 연결 문제로 응답이 전송되지 않았어요.)";
+    : "이 화면을 상담 선생님께 그대로 보여 주세요. (응답이 저장되지 않았어요.)";
   const ky = r.q3.join(", ");
   $("#minicard").innerHTML =
     `<div><dt>관심 계열</dt><dd>${esc(ky)}</dd></div>` +
@@ -488,7 +497,11 @@ updateProgress();
 let pin = ""; try { pin = sessionStorage.getItem("ssum-pin") || ""; } catch (e) {}
 async function tryUnlock(){
   const v = $("#pin").value.trim(), err = $("#pinerr");
-  if (!apiReady) { err.textContent = "Apps Script 주소가 아직 연결되지 않았어요. 예시 학생으로 화면만 볼 수 있어요."; err.hidden = false; pin = ""; openTeacher(); return; }
+  if (!apiReady) {
+    if (v !== LOCAL_PIN) { err.textContent = "코드가 맞지 않아요. 다시 입력해 주세요."; err.hidden = false; $("#pin").select(); return; }
+    pin = "local"; try { sessionStorage.setItem("ssum-pin", "local"); } catch (e) {}
+    err.hidden = true; applyRows(loadLocal()); openTeacher(); return;
+  }
   $("#unlock").disabled = true;
   try { const j = await api({ action: "list", pin: v }); pin = v; try { sessionStorage.setItem("ssum-pin", v); } catch (e) {} applyRows(j.rows); openTeacher(); }
   catch (e) { err.textContent = e.code === "bad_pin" ? "코드가 맞지 않아요. 다시 입력해 주세요." : "응답을 불러오지 못했어요. 인터넷 연결을 확인해 주세요."; err.hidden = false; $("#pin").select(); }
@@ -507,6 +520,16 @@ const SAMPLE = { id: "__sample", isSample: true, nick: "예시 학생", no: 123,
   q10: "공학이랑 교육 둘 다 관심 있는데 뭘 골라야 할지 모르겠어요. 부모님은 선생님이 안정적이라고 하시는데 저는 개발자도 하고 싶어요.",
   coachWord: "", action: "", memo: "", booths: [], subjects: "" };
 
+function csvDownload(){
+  const cols = [["no","접수번호"],["createdAt","접수시각"],["status","상태"],["nick","별명"],["q1","1 희망 진로"],["q2","2 좋아하는 것·잘하는 것"],["q3","3 관심 계열"],["q4","4 해 보고 싶은 일"],["q5","5 좋아하는 과목"],["q5r","5 이유"],["q6","6 싫어하는 과목"],["q6r","6 이유"],["q7","7 고교학점제"],["q8","8 공부 계획"],["q9","9 집중 방해"],["q10","10 요즘 고민"],["subjects","들어 볼 선택과목"],["coachWord","선생님 한마디"],["action","실천 1가지"],["booths","추천 부스"],["memo","교사 메모"]];
+  const st = { wait: "대기", doing: "상담 중", done: "상담 완료" };
+  const cell = (k, v) => { if (k === "createdAt") v = v ? mdhm(v) : ""; else if (k === "status") v = st[v] || v; else if (Array.isArray(v)) v = v.join(", "); v = String(v ?? ""); if (/^[=+\-@]/.test(v)) v = "'" + v; return '"' + v.replace(/"/g, '""') + '"'; };
+  const lines = [cols.map(c => cell("", c[1])).join(",")].concat(rows.map(r => cols.map(([k]) => cell(k, r[k])).join(",")));
+  const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "내꿈썸타는중_응답_" + todayKey() + ".csv";
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+$("#csvBtn").onclick = csvDownload;
 function applyRows(list){
   rows = (list || []).slice().sort((x, y) => (y.createdAt || 0) - (x.createdAt || 0));
   if (!$("#tmain").hidden) {
@@ -518,17 +541,25 @@ function applyRows(list){
 }
 async function refresh(){
   if (!pin) return;
+  if (!apiReady) { applyRows(loadLocal()); return; }
   try { const j = await api({ action: "list", pin }); applyRows(j.rows); $("#dbnote").hidden = true; }
   catch (e) { const n = $("#dbnote"); n.hidden = false; n.textContent = "새 응답을 불러오지 못했어요. 15초 뒤 다시 시도해요."; }
 }
 function openTeacher(){
   $("#lockbox").hidden = true; $("#tmain").hidden = false;
   const note = $("#dbnote");
-  if (!pin) { note.hidden = false; note.textContent = "구글 시트에 연결되지 않아 학생 응답을 불러올 수 없어요. 아래 예시 학생으로 상담 화면을 미리 볼 수 있어요."; }
+  if (!apiReady) {
+    note.hidden = false;
+    note.textContent = localOK
+      ? "태블릿 한 대 모드: 학생 응답이 이 기기에만 저장돼요. 브라우저 기록(사이트 데이터)을 지우면 응답도 사라지니, 행사가 끝나면 「CSV로 내려받기」로 보관하세요."
+      : "이 브라우저는 응답을 저장할 수 없어요(시크릿 모드인지 확인해 주세요). 일반 창에서 사이트를 열어 주세요.";
+  }
   renderAll();
   if (pin && !poll) poll = setInterval(() => { if (!document.hidden) refresh(); }, 15000);
 }
-if (pin && apiReady) refresh().then(openTeacher);
+if (pin && (apiReady || pin === "local")) { if (!apiReady) pin = "local"; refresh().then(openTeacher); }
+// 같은 기기에서 학생 탭 → 교사 탭으로 넘어오면 새 응답을 바로 불러오기
+$("#tab-teacher").addEventListener("click", () => { if (pin) refresh(); });
 
 document.getElementById("filters").addEventListener("click", e => {
   const b = e.target.closest("button[data-f]"); if (!b) return;
@@ -746,7 +777,7 @@ function renderDetail(){
 
   const save = async (patch) => {
     if (isS) { Object.assign(r, patch); renderList(); return true; }
-    try { await api({ action: "update", pin, id: r.id, patch }); Object.assign(r, patch); renderStats(); renderList(); return true; } catch (e) { $("#saveMsg").textContent = "저장하지 못했어요. 연결을 확인하고 다시 눌러 주세요."; return false; }
+    try { if (apiReady) await api({ action: "update", pin, id: r.id, patch }); else if (!localUpdate(r.id, patch)) throw new Error("local"); Object.assign(r, patch); renderStats(); renderList(); return true; } catch (e) { $("#saveMsg").textContent = "저장하지 못했어요. 연결을 확인하고 다시 눌러 주세요."; return false; }
   };
   box.querySelectorAll(".statusbtns button").forEach(b => b.onclick = async () => {
     if (await save({ status: b.dataset.s })) { r.status = b.dataset.s; box.querySelectorAll(".statusbtns button").forEach(x => x.setAttribute("aria-pressed", x === b)); if (isS) renderList(); }
@@ -764,7 +795,7 @@ function renderDetail(){
   if (del) del.onclick = () => {
     $("#delArea").innerHTML = `<span>#${esc(r.no)} 응답을 지울까요? 되돌릴 수 없어요.</span><button type="button" class="btn" id="delYes" style="padding:6px 16px;font-size:14px">삭제</button><button type="button" class="btn ghost" id="delNo">취소</button>`;
     $("#delNo").onclick = renderDetail;
-    $("#delYes").onclick = async () => { try { await api({ action: "delete", pin, id: r.id }); rows = rows.filter(x => x.id !== r.id); selId = null; renderAll(); } catch (e) { $("#delArea").textContent = "삭제하지 못했어요. 다시 시도해 주세요."; } };
+    $("#delYes").onclick = async () => { try { if (apiReady) await api({ action: "delete", pin, id: r.id }); else localDelete(r.id); rows = rows.filter(x => x.id !== r.id); selId = null; renderAll(); } catch (e) { $("#delArea").textContent = "삭제하지 못했어요. 다시 시도해 주세요."; } };
   };
 }
 
